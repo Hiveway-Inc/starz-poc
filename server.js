@@ -1,7 +1,9 @@
 require("dotenv").config();
 
 const express = require("express");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: "2026-03-25.dahlia",
+});
 const app = express();
 app.use(express.json());
 app.use(express.static("public"));
@@ -15,34 +17,24 @@ const YOUR_DOMAIN = process.env.YOUR_DOMAIN;
 const CHECKOUT_MODE = "subscription";
 const PRICE_ID = process.env.STRIPE_PRICE_ID;
 const CUSTOMER_ID = process.env.STRIPE_CUSTOMER_ID;
-const TEST_ADDRESS = {
-  line1: process.env.TEST_ADDRESS_LINE1,
-  city: process.env.TEST_ADDRESS_CITY,
-  state: process.env.TEST_ADDRESS_STATE,
-  country: process.env.TEST_ADDRESS_COUNTRY,
-};
-
 const requiredEnvVars = [
   "STRIPE_SECRET_KEY",
   "STRIPE_PUBLISHABLE_KEY",
   "STRIPE_PRICE_ID",
   "STRIPE_CUSTOMER_ID",
   "YOUR_DOMAIN",
-  "TEST_ADDRESS_LINE1",
-  "TEST_ADDRESS_CITY",
-  "TEST_ADDRESS_STATE",
-  "TEST_ADDRESS_COUNTRY",
 ];
 
 const missingEnvVars = requiredEnvVars.filter((name) => !process.env[name]);
 if (missingEnvVars.length > 0) {
-  throw new Error(`Missing required environment variables: ${missingEnvVars.join(", ")}`);
+  throw new Error(
+    `Missing required environment variables: ${missingEnvVars.join(", ")}`,
+  );
 }
 
 app.get("/config", (req, res) => {
   res.send({
     publishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
-    testAddress: TEST_ADDRESS,
   });
 });
 
@@ -51,35 +43,17 @@ app.post("/create-checkout-session", async (req, res) => {
     `[${new Date().toISOString()}] POST /create-checkout-session hit`,
   );
 
-  const { postalCode } = req.body ?? {};
   const customerId = CUSTOMER_ID;
 
   let session;
 
   try {
-    if (postalCode) {
-      // Automatic tax needs a recognizable customer tax location. A ZIP/postal
-      // code alone can be ambiguous, so include a complete test billing address.
-      await stripe.customers.update(customerId, {
-        address: {
-          line1: TEST_ADDRESS.line1,
-          city: TEST_ADDRESS.city,
-          state: TEST_ADDRESS.state,
-          postal_code: postalCode,
-          country: TEST_ADDRESS.country,
-        },
-      });
-    }
     session = await stripe.checkout.sessions.create({
-      ui_mode: "custom",
+      ui_mode: "elements",
       customer: customerId,
-      shipping_address_collection: {
-        allowed_countries: ["US", "CA"],
-      },
-      billing_address_collection: "required",
+      billing_address_collection: "auto",
       customer_update: {
         address: "auto",
-        shipping: "auto",
       },
       line_items: [
         {
@@ -93,24 +67,19 @@ app.post("/create-checkout-session", async (req, res) => {
       payment_method_types: ["card", "klarna"],
       return_url: `${YOUR_DOMAIN}/complete.html?session_id={CHECKOUT_SESSION_ID}`,
       automatic_tax: { enabled: true },
-      metadata: {
-        postal_code: postalCode ?? "",
-      },
-      subscription_data: {
-        metadata: {
-          postal_code: postalCode ?? "",
-        },
-      },
     });
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Failed to create checkout session`, {
-      type: error.type,
-      code: error.code,
-      decline_code: error.decline_code,
-      message: error.message,
-      param: error.param,
-      requestId: error.requestId,
-    });
+    console.error(
+      `[${new Date().toISOString()}] Failed to create checkout session`,
+      {
+        type: error.type,
+        code: error.code,
+        decline_code: error.decline_code,
+        message: error.message,
+        param: error.param,
+        requestId: error.requestId,
+      },
+    );
 
     res.status(error.statusCode || 500).send({
       error: {
@@ -126,8 +95,6 @@ app.post("/create-checkout-session", async (req, res) => {
         mode: CHECKOUT_MODE,
         priceId: PRICE_ID,
         customerId,
-        postalCodeProvided: Boolean(postalCode),
-        allowedShippingCountries: ["US", "CA"],
         billingAddressCollection: "required",
         automaticTaxEnabled: true,
       },
@@ -153,8 +120,6 @@ app.post("/create-checkout-session", async (req, res) => {
       amountTotal: session.amount_total,
       customerId: session.customer,
       priceId: PRICE_ID,
-      postalCodeProvided: Boolean(postalCode),
-      allowedShippingCountries: ["US", "CA"],
       billingAddressCollection: "required",
       automaticTaxEnabled: true,
     },

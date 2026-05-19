@@ -35,11 +35,6 @@ STRIPE_SECRET_KEY=sk_test_replace_me
 STRIPE_PUBLISHABLE_KEY=pk_test_replace_me
 STRIPE_PRICE_ID=price_replace_me
 STRIPE_CUSTOMER_ID=cus_replace_me
-
-TEST_ADDRESS_LINE1=345 N Canon Dr
-TEST_ADDRESS_CITY=Beverly Hills
-TEST_ADDRESS_STATE=CA
-TEST_ADDRESS_COUNTRY=US
 ```
 
 Notes:
@@ -95,28 +90,22 @@ https://your-ngrok-subdomain.ngrok-free.app/checkout.html
 
 Use the same HTTPS ngrok domain as the Checkout Session `return_url` domain so redirects return to the test app correctly.
 
-## Test ZIP/postal code
+## Address collection
 
-The checkout page pre-populates the ZIP code with:
+The checkout page creates the Checkout Session on load and immediately mounts the Payment Element. There is no separate ZIP/postal code field in this app anymore.
 
-```txt
-90210
+Stripe collects the required billing address details inside the Payment Element because the Checkout Session is created with:
+
+```js
+billing_address_collection: "required"
 ```
 
-For this POC, the client code uses that ZIP along with this configured test address for billing and shipping:
+The session uses:
 
-```txt
-345 N Canon Dr
-Beverly Hills, CA 90210
-US
+```js
+ui_mode: "elements",
+mode: "subscription"
 ```
-
-This is needed because:
-
-- `automatic_tax` is enabled.
-- `billing_address_collection` is required.
-- `shipping_address_collection` is enabled.
-- Custom Checkout requires billing/shipping address data to be provided manually unless you use an Address Element.
 
 ## Debugging Klarna visibility
 
@@ -133,7 +122,6 @@ The debug payload includes:
 - subtotal/total
 - customer ID
 - Price ID
-- whether a postal code was provided
 - billing/shipping/tax configuration
 - Stripe error details, if session creation fails
 
@@ -144,29 +132,24 @@ If Klarna is requested but does not appear, common reasons include:
 - Required customer/billing/shipping details are missing.
 - The Price is not a supported recurring Price.
 - The Stripe account is not eligible for Klarna subscriptions.
-- Shipping countries are currently limited in code to `US` and `CA`.
+- Billing address collection is required so Stripe can collect the customer's tax location.
 
 ## Current implementation details
 
 The server creates Checkout Sessions with:
 
 ```js
-ui_mode: "custom",
+ui_mode: "elements",
 mode: "subscription",
 payment_method_types: ["card", "klarna"],
 automatic_tax: { enabled: true },
-billing_address_collection: "required",
-shipping_address_collection: {
-  allowed_countries: ["US", "CA"],
-}
+billing_address_collection: "required"
 ```
 
-The frontend manually calls these Custom Checkout actions before confirmation:
+The frontend creates the Checkout Session during page initialization with `stripe.initCheckoutElementsSdk()`, mounts the Payment Element as soon as Checkout actions load, and calls only:
 
 ```js
-actions.updateBillingAddress(...)
-actions.updateShippingAddress(...)
 actions.confirm()
 ```
 
-The Payment Element is configured not to double-collect billing name/address because those values are supplied manually.
+on submit. Stripe handles ZIP/postal code collection through the Payment Element.

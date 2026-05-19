@@ -3,8 +3,7 @@ let appConfig;
 let checkout;
 let actions;
 let paymentElementMounted = false;
-// Create the Checkout Session after the customer enters their ZIP code so we
-// can attach it to the Stripe Customer/Subscription metadata.
+let latestDebugInfo = {};
 
 window.addEventListener("error", (event) => {
   console.error("Window error:", event.error || event.message);
@@ -20,9 +19,16 @@ document
   .querySelector("#payment-form")
   .addEventListener("submit", handleSubmit);
 
-// Fetches a Checkout Session and captures the client secret
+initialize().catch((error) => {
+  console.error("Checkout initialization failed:", error);
+  showMessage(formatError(error));
+  setLoading(false);
+});
+
+// Fetches a Checkout Session immediately so the Payment Element renders on load.
 async function initialize() {
-  const postalCode = document.querySelector("#postal-code").value.trim();
+  setLoading(true);
+  clearMessage();
 
   if (!appConfig) {
     appConfig = await fetchJson("/config");
@@ -32,10 +38,8 @@ async function initialize() {
     stripe = Stripe(appConfig.publishableKey);
   }
 
-  const promise = fetch("/create-checkout-session", {
+  const clientSecret = fetch("/create-checkout-session", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ postalCode }),
   })
     .then(async (response) => {
       const payload = await parseJsonResponse(response);
@@ -57,8 +61,9 @@ async function initialize() {
   const appearance = {
     theme: "stripe",
   };
-  checkout = stripe.initCheckout({
-    clientSecret: promise,
+
+  checkout = stripe.initCheckoutElementsSdk({
+    clientSecret,
     elementsOptions: { appearance },
   });
 
@@ -70,19 +75,59 @@ async function initialize() {
   }
 
   if (!paymentElementMounted) {
+    // Let Stripe collect required billing details (including ZIP/postal code)
+    // inside the Payment Element instead of using our own ZIP field.
     const paymentElement = checkout.createPaymentElement({
-      fields: {
-        billingDetails: {
-          // We provide these manually with actions.updateBillingAddress().
-          // Tell Payment Element not to collect them too.
-          name: "never",
-          address: "never",
-        },
+      // Keep wallets enabled inside the Payment Element. This does not add the
+      // Express Checkout Element; it only tells Stripe not to suppress wallet
+      // rows/buttons that are eligible for this Payment Element instance.
+      wallets: {
+        googlePay: "auto",
+        applePay: "auto",
       },
     });
+
+    paymentElement.on("ready", () => {
+      recordDebugInfo({
+        paymentElement: {
+          ready: true,
+          readyAt: new Date().toISOString(),
+        },
+      });
+    });
+
+    paymentElement.on("loaderror", (event) => {
+      console.error("Payment Element load error:", event);
+      recordDebugInfo({
+        paymentElement: {
+          ready: false,
+          loadError: event?.error || event,
+          loadErrorAt: new Date().toISOString(),
+        },
+      });
+    });
+
+    paymentElement.on("change", (event) => {
+      recordDebugInfo({
+        paymentElement: {
+          complete: event.complete,
+          empty: event.empty,
+          collapsed: event.collapsed,
+          selectedPaymentMethodType: event.value?.type,
+          lastChangeAt: new Date().toISOString(),
+        },
+      });
+    });
+
     paymentElement.mount("#payment-element");
     paymentElementMounted = true;
+
+    recordDebugInfo({
+      browserWalletChecks: collectBrowserWalletDebug(),
+    });
   }
+
+  setLoading(false);
 }
 
 async function handleSubmit(e) {
@@ -90,45 +135,10 @@ async function handleSubmit(e) {
   setLoading(true);
   clearMessage();
 
-  const postalCodeInput = document.querySelector("#postal-code");
-  const postalCodeError = document.querySelector("#postal-code-errors");
-  if (!postalCodeInput.value.trim()) {
-    postalCodeInput.classList.add("error");
-    postalCodeError.textContent = "Enter a ZIP/postal code.";
-    setLoading(false);
-    return;
-  }
-  postalCodeInput.classList.remove("error");
-  postalCodeError.textContent = "";
-
   try {
     if (!actions) {
-      await initialize();
-      showMessage("Payment form loaded. Complete the payment details, then submit again.");
-      return;
+      throw new Error("Checkout is still loading. Please try again in a moment.");
     }
-
-    // Custom Checkout does not automatically know about our separate ZIP field.
-    // Because the server creates the Session with billing_address_collection:
-    // "required", Stripe requires the client to provide a billing address before
-    // confirm. For this POC, use a complete US test address and the entered ZIP.
-    const testAddress = {
-      line1: appConfig.testAddress.line1,
-      city: appConfig.testAddress.city,
-      state: appConfig.testAddress.state,
-      postal_code: postalCodeInput.value.trim(),
-      country: appConfig.testAddress.country,
-    };
-
-    await actions.updateBillingAddress({
-      name: "Test Customer",
-      address: testAddress,
-    });
-
-    await actions.updateShippingAddress({
-      name: "Test Customer",
-      address: testAddress,
-    });
 
     const result = await actions.confirm();
 
@@ -192,6 +202,15 @@ async function parseJsonResponse(response) {
 }
 
 function updateDebugInfo(payload, httpStatus) {
+  recordDebugInfo({
+    httpStatus,
+    ...payload,
+  });
+}
+
+function recordDebugInfo(info) {
+  latestDebugInfo = deepMerge(latestDebugInfo, info);
+
   const debugContainer = document.querySelector("#debug-info");
   if (!debugContainer) {
     return;
@@ -199,10 +218,14 @@ function updateDebugInfo(payload, httpStatus) {
 
   debugContainer.textContent = JSON.stringify(
     {
-      httpStatus,
-      ...payload,
+      ...latestDebugInfo,
       notes: [
         "payment_method_types is hard-coded server-side to ['card', 'klarna'].",
+        "Google Pay is a card wallet; the server must allow card, and the browser/session must be wallet-eligible.",
+        "The Payment Element is explicitly created with wallets.googlePay = 'auto'; no Express Checkout Element is used.",
+        "Stripe does not expose a full per-wallet rejection reason from the Payment Element. Use browserWalletChecks plus Payment Element loaderror/ready to narrow down client-side issues.",
+        "Common Google Pay blockers: non-HTTPS origin, unsupported browser, no Google Pay/Chrome payment method, ineligible country/currency/amount, browser payment permissions/policies, or Stripe account/payment-method settings.",
+        "Billing address collection is required server-side, so Stripe collects ZIP/postal code in the Payment Element.",
         "If Klarna is in requested/session payment method types but not visible, Stripe may have filtered it for eligibility, country, currency, amount, customer details, Dashboard settings, or subscription/Billing constraints.",
         "If session creation fails, check error.message/code/param above.",
       ],
@@ -210,6 +233,65 @@ function updateDebugInfo(payload, httpStatus) {
     null,
     2,
   );
+}
+
+function collectBrowserWalletDebug() {
+  return {
+    href: window.location.href,
+    protocol: window.location.protocol,
+    hostname: window.location.hostname,
+    isSecureContext: window.isSecureContext,
+    hasPaymentRequest: typeof window.PaymentRequest !== "undefined",
+    userAgent: window.navigator.userAgent,
+    userAgentData: window.navigator.userAgentData
+      ? {
+          brands: window.navigator.userAgentData.brands,
+          mobile: window.navigator.userAgentData.mobile,
+          platform: window.navigator.userAgentData.platform,
+        }
+      : null,
+    permissionsPolicyPayment: getPaymentPermissionsPolicyDebug(),
+  };
+}
+
+function getPaymentPermissionsPolicyDebug() {
+  try {
+    const policy = document.permissionsPolicy || document.featurePolicy;
+    if (!policy) {
+      return "unavailable";
+    }
+
+    if (typeof policy.allowsFeature === "function") {
+      return policy.allowsFeature("payment");
+    }
+
+    if (typeof policy.allowedFeatures === "function") {
+      return policy.allowedFeatures().includes("payment");
+    }
+  } catch (error) {
+    return formatError(error);
+  }
+
+  return "unavailable";
+}
+
+function deepMerge(target, source) {
+  const output = { ...target };
+
+  for (const [key, value] of Object.entries(source || {})) {
+    if (
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      !(value instanceof Error)
+    ) {
+      output[key] = deepMerge(output[key] || {}, value);
+    } else {
+      output[key] = value;
+    }
+  }
+
+  return output;
 }
 
 function formatError(error) {

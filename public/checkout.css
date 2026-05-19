@@ -53,8 +53,7 @@ form {
   white-space: pre-wrap;
 }
 
-#email,
-#postal-code {
+#email {
   border-radius: 5px;
   box-shadow: 0px 1px 1px rgba(0, 0, 0, 0.03), 0px 3px 6px rgba(0, 0, 0, 0.02);
   display: block;
@@ -71,20 +70,17 @@ form {
   width: 100%;
 }
 
-#email:focus,
-#postal-code:focus {
+#email:focus {
   border: 1px solid hsl(210, 96%, 45%);
   box-shadow: 0px 1px 1px rgba(0, 0, 0, 0.03), 0px 3px 6px rgba(0, 0, 0, 0.02), 0 0 0 3px rgba(5, 112, 222, 0.2), 0 1px 1px 0 rgba(0, 0, 0, 0.08);
 }
 
-#email-errors,
-#postal-code-errors {
+#email-errors {
   margin-top: 4px;
   color: #df1b41;
 }
 
-#email.error,
-#postal-code.error {
+#email.error {
   color: #df1b41;
   border: 1px solid #df1b41;
   box-shadow: 0px 1px 1px rgba(0, 0, 0, 0.03), 0px 3px 6px rgba(0, 0, 0, 0.02), 0 0 0 3px rgba(223, 27, 65, 0.2), 0 1px 1px 0 rgba(0, 0, 0, 0.08);
