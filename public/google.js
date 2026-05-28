@@ -4,9 +4,8 @@ let checkout;
 let actions;
 let paymentElement;
 let paymentElementMounted = false;
-let paymentElementPostalCodeNever = false;
-let googlePaySelected = false;
-let applePaySelected = false;
+let paymentElementBillingFieldsNever = false;
+let googlePaySelected = true;
 let latestDebugInfo = {};
 
 window.addEventListener("error", (event) => {
@@ -19,17 +18,14 @@ window.addEventListener("unhandledrejection", (event) => {
   showMessage(formatError(event.reason));
 });
 
-document
-  .querySelector("#payment-form")
-  .addEventListener("submit", handleSubmit);
+document.querySelector("#payment-form").addEventListener("submit", handleSubmit);
 
 initialize().catch((error) => {
-  console.error("Checkout initialization failed:", error);
+  console.error("Google Pay checkout initialization failed:", error);
   showMessage(formatError(error));
   setLoading(false);
 });
 
-// Fetches a Checkout Session immediately so the Payment Element renders on load.
 async function initialize() {
   setLoading(true);
   clearMessage();
@@ -45,7 +41,7 @@ async function initialize() {
   const clientSecret = fetch("/create-checkout-session", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source: "checkout" }),
+    body: JSON.stringify({ source: "google" }),
   })
     .then(async (response) => {
       const payload = await parseJsonResponse(response);
@@ -58,40 +54,34 @@ async function initialize() {
       return payload;
     })
     .then((r) => {
-      console.log("Created checkout session:", r.sessionId, r.debug);
+      console.log("Created Google Pay checkout session:", r.sessionId, r.debug);
       document.querySelector("#checkout-session-id").textContent =
         r.sessionId || "Unavailable";
       return r.clientSecret;
     });
 
-  const appearance = {
-    theme: "stripe",
-  };
-
   checkout = stripe.initCheckoutElementsSdk({
     clientSecret,
-    elementsOptions: { appearance },
+    elementsOptions: { appearance: { theme: "stripe" } },
   });
 
   const loadActionsResult = await checkout.loadActions();
   if (loadActionsResult.type === "success") {
     actions = loadActionsResult.actions;
     loadActionsResult.actions.getSession();
-    document.querySelector("#button-text").textContent = "Subscribe now";
+    document.querySelector("#button-text").textContent = "Subscribe";
   }
 
   if (!paymentElementMounted) {
-    mountPaymentElement({ postalCodeNever: false });
-
-    recordDebugInfo({
-      browserWalletChecks: collectBrowserWalletDebug(),
-    });
+    mountPaymentElement({ billingFieldsNever: true });
+    updateGooglePayPostalCodeVisibility();
+    recordDebugInfo({ browserWalletChecks: collectBrowserWalletDebug() });
   }
 
   setLoading(false);
 }
 
-function mountPaymentElement({ postalCodeNever }) {
+function mountPaymentElement({ billingFieldsNever }) {
   const paymentElementContainer = document.querySelector("#payment-element");
 
   if (paymentElement) {
@@ -99,20 +89,21 @@ function mountPaymentElement({ postalCodeNever }) {
     paymentElementContainer.innerHTML = "";
   }
 
-  paymentElementPostalCodeNever = postalCodeNever;
+  paymentElementBillingFieldsNever = billingFieldsNever;
   paymentElement = checkout.createPaymentElement({
-    // Keep wallets enabled inside the Payment Element. This does not add the
-    // Express Checkout Element; it only tells Stripe not to suppress wallet
-    // rows/buttons that are eligible for this Payment Element instance.
     wallets: {
       googlePay: "auto",
-      applePay: "auto",
+      applePay: "never",
     },
-    ...(postalCodeNever
+    ...(billingFieldsNever
       ? {
           fields: {
             billingDetails: {
+              name: "never",
+              email: "never",
+              phone: "never",
               address: {
+                country: "never",
                 postalCode: "never",
               },
             },
@@ -125,7 +116,8 @@ function mountPaymentElement({ postalCodeNever }) {
     recordDebugInfo({
       paymentElement: {
         ready: true,
-        postalCodeNever: paymentElementPostalCodeNever,
+        walletPage: "google",
+        billingFieldsNever: paymentElementBillingFieldsNever,
         readyAt: new Date().toISOString(),
       },
     });
@@ -136,7 +128,8 @@ function mountPaymentElement({ postalCodeNever }) {
     recordDebugInfo({
       paymentElement: {
         ready: false,
-        postalCodeNever: paymentElementPostalCodeNever,
+        walletPage: "google",
+        billingFieldsNever: paymentElementBillingFieldsNever,
         loadError: event?.error || event,
         loadErrorAt: new Date().toISOString(),
       },
@@ -145,35 +138,21 @@ function mountPaymentElement({ postalCodeNever }) {
 
   paymentElement.on("change", (event) => {
     const selectedGooglePay = isGooglePaySelection(event);
-    const selectedApplePay = isApplePaySelection(event);
 
     recordDebugInfo({
       paymentElement: {
         complete: event.complete,
         empty: event.empty,
         collapsed: event.collapsed,
-        postalCodeNever: paymentElementPostalCodeNever,
+        billingFieldsNever: paymentElementBillingFieldsNever,
         googlePaySelected: selectedGooglePay,
-        applePaySelected: selectedApplePay,
         selectedPaymentMethodType: event.value?.type,
         selectedPaymentMethodDetails: event.value,
         lastChangeAt: new Date().toISOString(),
       },
     });
 
-    if (selectedGooglePay && !paymentElementPostalCodeNever) {
-      googlePaySelected = true;
-      applePaySelected = false;
-      updateGooglePayPostalCodeVisibility();
-      showMessage(
-        "Google Pay selected. Reloading the Payment Element so you can enter a custom ZIP code.",
-      );
-      mountPaymentElement({ postalCodeNever: true });
-      return;
-    }
-
-    googlePaySelected = selectedGooglePay;
-    applePaySelected = selectedApplePay;
+    googlePaySelected = true;
     updateGooglePayPostalCodeVisibility();
   });
 
@@ -182,7 +161,8 @@ function mountPaymentElement({ postalCodeNever }) {
 
   recordDebugInfo({
     paymentElement: {
-      postalCodeNever: paymentElementPostalCodeNever,
+      walletPage: "google",
+      billingFieldsNever: paymentElementBillingFieldsNever,
       remountedAt: new Date().toISOString(),
     },
   });
@@ -190,47 +170,31 @@ function mountPaymentElement({ postalCodeNever }) {
 
 async function handleSubmit(e) {
   e.preventDefault();
+  setLoading(true);
+  clearMessage();
 
   try {
     if (!actions) {
       throw new Error("Checkout is still loading. Please try again in a moment.");
     }
 
-    // Safari requires ApplePaySession creation to happen directly from the
-    // user activation. Keep the normal confirm path before UI updates,
-    // validation, fetches, or any awaited work. Google Pay is the only path
-    // that still needs pre-confirm custom ZIP handling.
-    if (!googlePaySelected) {
-      const result = await actions.confirm();
-      handleConfirmResult(result);
+    const postalCode = validateGooglePayPostalCode();
+    if (!postalCode) {
+      setLoading(false);
       return;
     }
 
-    setLoading(true);
-    clearMessage();
-
-    if (googlePaySelected) {
-      const postalCode = validateGooglePayPostalCode();
-      if (!postalCode) {
-        setLoading(false);
-        return;
-      }
-
-      await actions.updateBillingAddress({
-        address: {
-          // Keep collection intentionally limited to our custom ZIP field for
-          // Google Pay. Other payment methods continue to use Stripe's billing
-          // details collection inside the Payment Element.
-          postal_code: postalCode,
-          country: "US",
-        },
-      });
-    }
+    await actions.updateBillingAddress({
+      address: {
+        postal_code: postalCode,
+        country: "US",
+      },
+    });
 
     const result = await actions.confirm();
     handleConfirmResult(result);
   } catch (error) {
-    console.error("Checkout confirm threw:", error);
+    console.error("Google Pay confirm threw:", error);
     showMessage(formatError(error));
   } finally {
     setLoading(false);
@@ -238,11 +202,6 @@ async function handleSubmit(e) {
 }
 
 function handleConfirmResult(result) {
-  // This point will only be reached if there is an immediate error when
-  // confirming the payment. Otherwise, your customer will be redirected to
-  // your `return_url`. For some payment methods like iDEAL, your customer will
-  // be redirected to an intermediate site first to authorize the payment, then
-  // redirected to the `return_url`.
   if (result?.error) {
     console.error("Checkout confirm error:", result.error);
     showMessage(formatError(result.error));
@@ -253,17 +212,10 @@ function updateGooglePayPostalCodeVisibility() {
   const container = document.querySelector("#google-pay-postal-code-container");
   const input = document.querySelector("#google-pay-postal-code");
   const error = document.querySelector("#google-pay-postal-code-errors");
-  if (!container || !input || !error) {
-    return;
-  }
+  if (!container || !input || !error) return;
 
-  container.classList.toggle("hidden", !googlePaySelected);
-  input.required = googlePaySelected;
-
-  if (!googlePaySelected) {
-    input.classList.remove("error");
-    error.textContent = "";
-  }
+  container.classList.remove("hidden");
+  input.required = true;
 }
 
 function validateGooglePayPostalCode() {
@@ -273,17 +225,13 @@ function validateGooglePayPostalCode() {
 
   if (!postalCode) {
     input?.classList.add("error");
-    if (error) {
-      error.textContent = "Enter a ZIP/postal code for Google Pay.";
-    }
+    if (error) error.textContent = "Enter a ZIP/postal code for Google Pay.";
     showMessage("Enter a ZIP/postal code for Google Pay.");
     return "";
   }
 
   input.classList.remove("error");
-  if (error) {
-    error.textContent = "";
-  }
+  if (error) error.textContent = "";
 
   recordDebugInfo({
     googlePayCustomPostalCode: {
@@ -299,48 +247,14 @@ function isGooglePaySelection(event) {
   return objectContainsString(event, ["google_pay", "googlepay", "google pay"]);
 }
 
-function isApplePaySelection(event) {
-  return objectContainsString(event, ["apple_pay", "applepay", "apple pay"]);
-}
-
-function objectContainsString(value, needles, seen = new WeakSet()) {
-  if (value == null) {
-    return false;
-  }
-
-  if (typeof value === "string") {
-    const normalized = value.toLowerCase().replace(/[\s-]/g, "_");
-    return needles.some((needle) => normalized.includes(needle.replace(/[\s-]/g, "_")));
-  }
-
-  if (typeof value !== "object") {
-    return false;
-  }
-
-  if (seen.has(value)) {
-    return false;
-  }
-  seen.add(value);
-
-  return Object.entries(value).some(
-    ([key, nestedValue]) =>
-      objectContainsString(key, needles, seen) ||
-      objectContainsString(nestedValue, needles, seen),
-  );
-}
-
-// ------- UI helpers -------
-
 function showMessage(messageText) {
   const messageContainer = document.querySelector("#payment-message");
-
   messageContainer.classList.remove("hidden");
   messageContainer.textContent = messageText;
 }
 
 function clearMessage() {
   const messageContainer = document.querySelector("#payment-message");
-
   messageContainer.classList.add("hidden");
   messageContainer.textContent = "";
 }
@@ -372,32 +286,21 @@ async function parseJsonResponse(response) {
 }
 
 function updateDebugInfo(payload, httpStatus) {
-  recordDebugInfo({
-    httpStatus,
-    ...payload,
-  });
+  recordDebugInfo({ httpStatus, ...payload });
 }
 
 function recordDebugInfo(info) {
   latestDebugInfo = deepMerge(latestDebugInfo, info);
-
   const debugContainer = document.querySelector("#debug-info");
-  if (!debugContainer) {
-    return;
-  }
+  if (!debugContainer) return;
 
   debugContainer.textContent = JSON.stringify(
     {
       ...latestDebugInfo,
       notes: [
-        "payment_method_types is hard-coded server-side to ['card', 'klarna'].",
-        "Google Pay is a card wallet; the server must allow card, and the browser/session must be wallet-eligible.",
-        "The Payment Element is explicitly created with wallets.googlePay = 'auto'; no Express Checkout Element is used.",
-        "Stripe does not expose a full per-wallet rejection reason from the Payment Element. Use browserWalletChecks plus Payment Element loaderror/ready to narrow down client-side issues.",
+        "Google Pay page: Payment Element wallets.googlePay='auto', wallets.applePay='never', and billing detail fields are set to 'never'.",
+        "Google Pay uses the custom ZIP field and actions.updateBillingAddress() before confirm.",
         "Common Google Pay blockers: non-HTTPS origin, unsupported browser, no Google Pay/Chrome payment method, ineligible country/currency/amount, browser payment permissions/policies, or Stripe account/payment-method settings.",
-        "Billing address collection is required server-side, so Stripe collects ZIP/postal code in the Payment Element.",
-        "If Klarna is in requested/session payment method types but not visible, Stripe may have filtered it for eligibility, country, currency, amount, customer details, Dashboard settings, or subscription/Billing constraints.",
-        "If session creation fails, check error.message/code/param above.",
       ],
     },
     null,
@@ -427,56 +330,49 @@ function collectBrowserWalletDebug() {
 function getPaymentPermissionsPolicyDebug() {
   try {
     const policy = document.permissionsPolicy || document.featurePolicy;
-    if (!policy) {
-      return "unavailable";
-    }
-
-    if (typeof policy.allowsFeature === "function") {
-      return policy.allowsFeature("payment");
-    }
-
+    if (!policy) return "unavailable";
+    if (typeof policy.allowsFeature === "function") return policy.allowsFeature("payment");
     if (typeof policy.allowedFeatures === "function") {
       return policy.allowedFeatures().includes("payment");
     }
   } catch (error) {
     return formatError(error);
   }
-
   return "unavailable";
+}
+
+function objectContainsString(value, needles, seen = new WeakSet()) {
+  if (value == null) return false;
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase().replace(/[\s-]/g, "_");
+    return needles.some((needle) => normalized.includes(needle.replace(/[\s-]/g, "_")));
+  }
+  if (typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  return Object.entries(value).some(
+    ([key, nestedValue]) =>
+      objectContainsString(key, needles, seen) ||
+      objectContainsString(nestedValue, needles, seen),
+  );
 }
 
 function deepMerge(target, source) {
   const output = { ...target };
-
   for (const [key, value] of Object.entries(source || {})) {
-    if (
-      value &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      !(value instanceof Error)
-    ) {
+    if (value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Error)) {
       output[key] = deepMerge(output[key] || {}, value);
     } else {
       output[key] = value;
     }
   }
-
   return output;
 }
 
 function formatError(error) {
-  if (!error) {
-    return "An unknown error occurred.";
-  }
-
-  if (typeof error === "string") {
-    return error;
-  }
-
-  if (error.message) {
-    return error.message;
-  }
-
+  if (!error) return "An unknown error occurred.";
+  if (typeof error === "string") return error;
+  if (error.message) return error.message;
   try {
     return JSON.stringify(error, null, 2);
   } catch {
@@ -484,10 +380,8 @@ function formatError(error) {
   }
 }
 
-// Show a spinner on payment submission
 function setLoading(isLoading) {
   if (isLoading) {
-    // Disable the button and show a spinner
     document.querySelector("#submit").disabled = true;
     document.querySelector("#spinner").classList.remove("hidden");
     document.querySelector("#button-text").classList.add("hidden");

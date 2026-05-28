@@ -2,30 +2,33 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Accept a Klarna subscription</title>
-    <meta name="description" content="A demo of a payment on Stripe" />
+    <title>Accept an Apple Pay subscription</title>
+    <meta name="description" content="A demo of Apple Pay with Stripe" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="stylesheet" href="checkout.css" />
     <script src="https://js.stripe.com/dahlia/stripe.js"></script>
-    <script src="checkout.js" defer></script>
+    <script src="apple.js" defer></script>
   </head>
   <body>
-    <!-- Display a payment form -->
     <div>
       <strong>Checkout Session ID:</strong>
       <code id="checkout-session-id">Creating session…</code>
     </div>
 
     <form id="payment-form">
-      <h4>Payment</h4>
+      <h4>Contact details</h4>
+      <div id="contact-details-element">
+        <!--Stripe.js injects the Contact Details Element-->
+      </div>
+
+      <h4>Apple Pay</h4>
       <div id="payment-element">
         <!--Stripe.js injects the Payment Element-->
       </div>
 
-      <div id="google-pay-postal-code-container" class="hidden">
-        <h4>Google Pay billing ZIP code</h4>
-        <input id="google-pay-postal-code" name="google-pay-postal-code" autocomplete="postal-code" inputmode="numeric" placeholder="ZIP code" />
-        <div id="google-pay-postal-code-errors" role="alert"></div>
+      <h4>Billing address</h4>
+      <div id="billing-address-element">
+        <!--Stripe.js injects the Billing Address Element-->
       </div>
 
       <button id="submit">

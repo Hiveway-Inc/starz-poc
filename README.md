@@ -68,6 +68,12 @@ Open:
 http://localhost:4141/checkout.html
 ```
 
+To save Google Pay to the existing test customer with a SetupIntent, open:
+
+```txt
+http://localhost:4141/setup.html
+```
+
 ## HTTPS testing with ngrok
 
 Apple Pay and Google Pay require HTTPS for realistic browser testing. You can expose the local server over HTTPS with ngrok:
@@ -86,6 +92,12 @@ Restart the server after updating `.env`, then open:
 
 ```txt
 https://your-ngrok-subdomain.ngrok-free.app/checkout.html
+```
+
+For the Google Pay SetupIntent flow, open:
+
+```txt
+https://your-ngrok-subdomain.ngrok-free.app/setup.html
 ```
 
 Use the same HTTPS ngrok domain as the Checkout Session `return_url` domain so redirects return to the test app correctly.
@@ -133,6 +145,16 @@ If Klarna is requested but does not appear, common reasons include:
 - The Price is not a supported recurring Price.
 - The Stripe account is not eligible for Klarna subscriptions.
 - Billing address collection is required so Stripe can collect the customer's tax location.
+
+## Google Pay SetupIntent flow
+
+The `/setup.html` page creates a SetupIntent with the existing `STRIPE_CUSTOMER_ID`, mounts a Payment Element configured with Google Pay enabled, and confirms with:
+
+```js
+stripe.confirmSetup({ elements, redirect: "if_required" })
+```
+
+When the SetupIntent succeeds, Stripe attaches the saved card-backed Google Pay payment method to that customer.
 
 ## Current implementation details
 

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Add Google Pay to a customer</title>
+    <meta name="description" content="Save Google Pay to an existing Stripe customer with a SetupIntent" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="checkout.css" />
+    <script src="https://js.stripe.com/dahlia/stripe.js"></script>
+    <script src="setup.js" defer></script>
+  </head>
+  <body>
+    <div>
+      <strong>SetupIntent ID:</strong>
+      <code id="setup-intent-id">Creating setup intent…</code>
+    </div>
+
+    <form id="setup-form">
+      <h4>Save Google Pay</h4>
+      <p class="helper-text">
+        This page creates a SetupIntent for the existing customer and confirms it with the
+        Payment Element. Choose Google Pay to save that wallet-backed card to the customer.
+      </p>
+
+      <div id="payment-element">
+        <!--Stripe.js injects the Payment Element-->
+      </div>
+
+      <button id="submit">
+        <div class="spinner hidden" id="spinner"></div>
+        <span id="button-text">Add Google Pay</span>
+      </button>
+      <div id="payment-message" class="hidden"></div>
+      <h4>Debug</h4>
+      <pre id="debug-info">No setup intent created yet.</pre>
+    </form>
+  </body>
+</html>

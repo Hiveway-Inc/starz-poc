@@ -38,12 +38,78 @@ app.get("/config", (req, res) => {
   });
 });
 
+app.post("/create-setup-intent", async (req, res) => {
+  console.log(`[${new Date().toISOString()}] POST /create-setup-intent hit`);
+
+  const customerId = CUSTOMER_ID;
+
+  try {
+    const setupIntent = await stripe.setupIntents.create({
+      customer: customerId,
+      usage: "off_session",
+      // Google Pay saves as a card-backed payment method on the Customer.
+      payment_method_types: ["card"],
+      metadata: {
+        flow: "setup_google_pay_payment_element",
+      },
+    });
+
+    console.log(`[${new Date().toISOString()}] Created setup intent`, {
+      setupIntentId: setupIntent.id,
+      status: setupIntent.status,
+      customerId: setupIntent.customer,
+    });
+
+    res.send({
+      clientSecret: setupIntent.client_secret,
+      setupIntentId: setupIntent.id,
+      debug: {
+        flow: "setup_intent_google_pay_payment_element",
+        customerId: setupIntent.customer,
+        usage: setupIntent.usage,
+        status: setupIntent.status,
+        paymentMethodTypes: setupIntent.payment_method_types,
+      },
+    });
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Failed to create setup intent`, {
+      type: error.type,
+      code: error.code,
+      decline_code: error.decline_code,
+      message: error.message,
+      param: error.param,
+      requestId: error.requestId,
+    });
+
+    res.status(error.statusCode || 500).send({
+      error: {
+        type: error.type,
+        code: error.code,
+        decline_code: error.decline_code,
+        message: error.message,
+        param: error.param,
+        requestId: error.requestId,
+      },
+      debug: {
+        flow: "setup_intent_google_pay_payment_element",
+        customerId,
+        usage: "off_session",
+        paymentMethodTypes: ["card"],
+      },
+    });
+  }
+});
+
 app.post("/create-checkout-session", async (req, res) => {
   console.log(
     `[${new Date().toISOString()}] POST /create-checkout-session hit`,
   );
 
   const customerId = CUSTOMER_ID;
+  const allowedReturnSources = new Set(["checkout", "apple", "google"]);
+  const returnSource = allowedReturnSources.has(req.body?.source)
+    ? req.body.source
+    : "checkout";
 
   let session;
 
@@ -65,7 +131,7 @@ app.post("/create-checkout-session", async (req, res) => {
       mode: CHECKOUT_MODE,
       // Hard-coded requested payment methods for this POC.
       payment_method_types: ["card", "klarna"],
-      return_url: `${YOUR_DOMAIN}/complete.html?session_id={CHECKOUT_SESSION_ID}`,
+      return_url: `${YOUR_DOMAIN}/complete.html?session_id={CHECKOUT_SESSION_ID}&source=${returnSource}`,
       automatic_tax: { enabled: true },
     });
   } catch (error) {

@@ -1,3 +1,9 @@
+const RETURN_PATHS = {
+  checkout: "/checkout.html",
+  apple: "/apple.html",
+  google: "/google.html",
+};
+
 // ------- UI Resources -------
 const SuccessIcon =
 `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -75,6 +81,8 @@ async function initialize() {
   const queryString = window.location.search;
   const urlParams = new URLSearchParams(queryString);
   const sessionId = urlParams.get("session_id");
+  const source = getReturnSource(urlParams);
+  configureRetryButton(source);
   if (!sessionId) {
     console.log("No session ID found");
     setErrorState();
@@ -84,4 +92,26 @@ async function initialize() {
   const session = await response.json();
 
   setSessionDetails(session);
+}
+
+function getReturnSource(urlParams) {
+  const source = urlParams.get("source");
+  if (source && RETURN_PATHS[source]) {
+    window.sessionStorage.setItem("checkoutReturnSource", source);
+    return source;
+  }
+
+  const storedSource = window.sessionStorage.getItem("checkoutReturnSource");
+  if (storedSource && RETURN_PATHS[storedSource]) {
+    return storedSource;
+  }
+
+  return "checkout";
+}
+
+function configureRetryButton(source) {
+  const retryButton = document.querySelector("#retry-button");
+  if (!retryButton) return;
+
+  retryButton.href = RETURN_PATHS[source] || RETURN_PATHS.checkout;
 }
