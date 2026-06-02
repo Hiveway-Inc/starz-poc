@@ -4,10 +4,13 @@ let checkout;
 let actions;
 let paymentElement;
 let paymentElementMounted = false;
-let paymentElementPostalCodeNever = false;
+let paymentElementBillingAddressNever = false;
 let googlePaySelected = false;
 let applePaySelected = false;
 let latestDebugInfo = {};
+let syncedWalletPostalCode = "";
+let walletPostalCodeUpdateTimer;
+let walletPostalCodeUpdatePromise = null;
 
 window.addEventListener("error", (event) => {
   console.error("Window error:", event.error || event.message);
@@ -22,6 +25,9 @@ window.addEventListener("unhandledrejection", (event) => {
 document
   .querySelector("#payment-form")
   .addEventListener("submit", handleSubmit);
+const walletPostalCodeInput = document.querySelector("#google-pay-postal-code");
+walletPostalCodeInput?.addEventListener("input", () => scheduleWalletPostalCodeSync());
+walletPostalCodeInput?.addEventListener("blur", () => syncWalletPostalCode());
 
 initialize().catch((error) => {
   console.error("Checkout initialization failed:", error);
@@ -81,7 +87,7 @@ async function initialize() {
   }
 
   if (!paymentElementMounted) {
-    mountPaymentElement({ postalCodeNever: false });
+    mountPaymentElement({ billingAddressNever: false });
 
     recordDebugInfo({
       browserWalletChecks: collectBrowserWalletDebug(),
@@ -91,7 +97,7 @@ async function initialize() {
   setLoading(false);
 }
 
-function mountPaymentElement({ postalCodeNever }) {
+function mountPaymentElement({ billingAddressNever }) {
   const paymentElementContainer = document.querySelector("#payment-element");
 
   if (paymentElement) {
@@ -99,7 +105,7 @@ function mountPaymentElement({ postalCodeNever }) {
     paymentElementContainer.innerHTML = "";
   }
 
-  paymentElementPostalCodeNever = postalCodeNever;
+  paymentElementBillingAddressNever = billingAddressNever;
   paymentElement = checkout.createPaymentElement({
     // Keep wallets enabled inside the Payment Element. This does not add the
     // Express Checkout Element; it only tells Stripe not to suppress wallet
@@ -108,13 +114,11 @@ function mountPaymentElement({ postalCodeNever }) {
       googlePay: "auto",
       applePay: "auto",
     },
-    ...(postalCodeNever
+    ...(billingAddressNever
       ? {
           fields: {
             billingDetails: {
-              address: {
-                postalCode: "never",
-              },
+              address: "never",
             },
           },
         }
@@ -125,7 +129,7 @@ function mountPaymentElement({ postalCodeNever }) {
     recordDebugInfo({
       paymentElement: {
         ready: true,
-        postalCodeNever: paymentElementPostalCodeNever,
+        billingAddressNever: paymentElementBillingAddressNever,
         readyAt: new Date().toISOString(),
       },
     });
@@ -136,7 +140,7 @@ function mountPaymentElement({ postalCodeNever }) {
     recordDebugInfo({
       paymentElement: {
         ready: false,
-        postalCodeNever: paymentElementPostalCodeNever,
+        billingAddressNever: paymentElementBillingAddressNever,
         loadError: event?.error || event,
         loadErrorAt: new Date().toISOString(),
       },
@@ -152,7 +156,7 @@ function mountPaymentElement({ postalCodeNever }) {
         complete: event.complete,
         empty: event.empty,
         collapsed: event.collapsed,
-        postalCodeNever: paymentElementPostalCodeNever,
+        billingAddressNever: paymentElementBillingAddressNever,
         googlePaySelected: selectedGooglePay,
         applePaySelected: selectedApplePay,
         selectedPaymentMethodType: event.value?.type,
@@ -161,14 +165,14 @@ function mountPaymentElement({ postalCodeNever }) {
       },
     });
 
-    if (selectedGooglePay && !paymentElementPostalCodeNever) {
-      googlePaySelected = true;
-      applePaySelected = false;
+    if ((selectedGooglePay || selectedApplePay) && !paymentElementBillingAddressNever) {
+      googlePaySelected = selectedGooglePay;
+      applePaySelected = selectedApplePay;
       updateGooglePayPostalCodeVisibility();
       showMessage(
-        "Google Pay selected. Reloading the Payment Element so you can enter a custom ZIP code.",
+        "Wallet selected. Reloading the Payment Element so you can enter a custom ZIP code.",
       );
-      mountPaymentElement({ postalCodeNever: true });
+      mountPaymentElement({ billingAddressNever: true });
       return;
     }
 
@@ -182,7 +186,7 @@ function mountPaymentElement({ postalCodeNever }) {
 
   recordDebugInfo({
     paymentElement: {
-      postalCodeNever: paymentElementPostalCodeNever,
+      billingAddressNever: paymentElementBillingAddressNever,
       remountedAt: new Date().toISOString(),
     },
   });
@@ -196,37 +200,34 @@ async function handleSubmit(e) {
       throw new Error("Checkout is still loading. Please try again in a moment.");
     }
 
-    // Safari requires ApplePaySession creation to happen directly from the
-    // user activation. Keep the normal confirm path before UI updates,
-    // validation, fetches, or any awaited work. Google Pay is the only path
-    // that still needs pre-confirm custom ZIP handling.
-    if (!googlePaySelected) {
-      const result = await actions.confirm();
-      handleConfirmResult(result);
-      return;
-    }
-
-    setLoading(true);
-    clearMessage();
-
-    if (googlePaySelected) {
+    if (googlePaySelected || applePaySelected) {
       const postalCode = validateGooglePayPostalCode();
       if (!postalCode) {
-        setLoading(false);
         return;
       }
 
-      await actions.updateBillingAddress({
-        address: {
-          // Keep collection intentionally limited to our custom ZIP field for
-          // Google Pay. Other payment methods continue to use Stripe's billing
-          // details collection inside the Payment Element.
-          postal_code: postalCode,
-          country: "US",
-        },
-      });
+      clearTimeout(walletPostalCodeUpdateTimer);
+
+      if (applePaySelected && walletPostalCodeUpdatePromise) {
+        showMessage("Billing ZIP is still updating — click Apple Pay again after this message clears.");
+        await walletPostalCodeUpdatePromise;
+        return;
+      }
+
+      if (applePaySelected && postalCode !== syncedWalletPostalCode) {
+        showMessage("ZIP changed. Updating billing ZIP now — click Apple Pay again after this message clears.");
+        await syncWalletPostalCode();
+        return;
+      }
+
+      if (googlePaySelected) {
+        await syncWalletPostalCode();
+      }
     }
 
+    // Apple Pay must be opened directly from the click/tap. For Apple Pay,
+    // updateBillingAddress is intentionally synced before submit, not awaited
+    // immediately before this confirm call.
     const result = await actions.confirm();
     handleConfirmResult(result);
   } catch (error) {
@@ -257,12 +258,61 @@ function updateGooglePayPostalCodeVisibility() {
     return;
   }
 
-  container.classList.toggle("hidden", !googlePaySelected);
-  input.required = googlePaySelected;
+  const walletSelected = googlePaySelected || applePaySelected;
+  container.classList.toggle("hidden", !walletSelected);
+  input.required = walletSelected;
 
-  if (!googlePaySelected) {
+  if (walletSelected) {
+    scheduleWalletPostalCodeSync();
+  }
+
+  if (!walletSelected) {
     input.classList.remove("error");
     error.textContent = "";
+  }
+}
+
+function scheduleWalletPostalCodeSync() {
+  clearTimeout(walletPostalCodeUpdateTimer);
+  walletPostalCodeUpdateTimer = setTimeout(() => {
+    syncWalletPostalCode({ showErrors: false });
+  }, 400);
+}
+
+async function syncWalletPostalCode({ showErrors = true } = {}) {
+  if (!actions || (!googlePaySelected && !applePaySelected)) return;
+
+  const postalCode = showErrors
+    ? validateGooglePayPostalCode()
+    : document.querySelector("#google-pay-postal-code")?.value.trim();
+
+  if (!postalCode) return;
+  if (postalCode === syncedWalletPostalCode) return;
+
+  try {
+    walletPostalCodeUpdatePromise = actions.updateBillingAddress({
+      address: {
+        postal_code: postalCode,
+        country: "US",
+      },
+    });
+    await walletPostalCodeUpdatePromise;
+    syncedWalletPostalCode = postalCode;
+    recordDebugInfo({
+      walletCustomPostalCode: {
+        provided: true,
+        googlePaySelected,
+        applePaySelected,
+        syncedPostalCode: postalCode,
+        syncedAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error("Wallet ZIP update failed:", error);
+    if (showErrors) showMessage(formatError(error));
+    recordDebugInfo({ walletPostalCodeUpdateError: error });
+  } finally {
+    walletPostalCodeUpdatePromise = null;
   }
 }
 
@@ -274,9 +324,9 @@ function validateGooglePayPostalCode() {
   if (!postalCode) {
     input?.classList.add("error");
     if (error) {
-      error.textContent = "Enter a ZIP/postal code for Google Pay.";
+      error.textContent = "Enter a ZIP/postal code for this wallet.";
     }
-    showMessage("Enter a ZIP/postal code for Google Pay.");
+    showMessage("Enter a ZIP/postal code for this wallet.");
     return "";
   }
 
@@ -286,8 +336,10 @@ function validateGooglePayPostalCode() {
   }
 
   recordDebugInfo({
-    googlePayCustomPostalCode: {
+    walletCustomPostalCode: {
       provided: true,
+      googlePaySelected,
+      applePaySelected,
       updatedAt: new Date().toISOString(),
     },
   });
@@ -395,7 +447,7 @@ function recordDebugInfo(info) {
         "The Payment Element is explicitly created with wallets.googlePay = 'auto'; no Express Checkout Element is used.",
         "Stripe does not expose a full per-wallet rejection reason from the Payment Element. Use browserWalletChecks plus Payment Element loaderror/ready to narrow down client-side issues.",
         "Common Google Pay blockers: non-HTTPS origin, unsupported browser, no Google Pay/Chrome payment method, ineligible country/currency/amount, browser payment permissions/policies, or Stripe account/payment-method settings.",
-        "Billing address collection is required server-side, so Stripe collects ZIP/postal code in the Payment Element.",
+        "When Apple Pay or Google Pay is selected, the Payment Element is remounted with fields.billingDetails.address='never'. Apple Pay syncs the manual ZIP before the submit click; Google Pay may update it in the submit path before confirm.",
         "If Klarna is in requested/session payment method types but not visible, Stripe may have filtered it for eligibility, country, currency, amount, customer details, Dashboard settings, or subscription/Billing constraints.",
         "If session creation fails, check error.message/code/param above.",
       ],
@@ -487,12 +539,10 @@ function formatError(error) {
 // Show a spinner on payment submission
 function setLoading(isLoading) {
   if (isLoading) {
-    // Disable the button and show a spinner
-    document.querySelector("#submit").disabled = true;
+    // Keep the button enabled so Stripe/validation errors remain visible while testing.
     document.querySelector("#spinner").classList.remove("hidden");
     document.querySelector("#button-text").classList.add("hidden");
   } else {
-    document.querySelector("#submit").disabled = false;
     document.querySelector("#spinner").classList.add("hidden");
     document.querySelector("#button-text").classList.remove("hidden");
   }

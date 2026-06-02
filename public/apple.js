@@ -3,6 +3,11 @@ let appConfig;
 let checkout;
 let actions;
 let latestDebugInfo = {};
+let isLoading = false;
+let checkoutCanConfirm = false;
+let syncedApplePayPostalCode = "";
+let applePayPostalCodeUpdatePromise = null;
+let applePayPostalCodeUpdateTimer;
 
 window.addEventListener("error", (event) => {
   console.error("Window error:", event.error || event.message);
@@ -15,6 +20,9 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 
 document.querySelector("#payment-form").addEventListener("submit", handleSubmit);
+const applePayPostalCodeInput = document.querySelector("#apple-pay-postal-code");
+applePayPostalCodeInput?.addEventListener("input", () => scheduleApplePayPostalCodeSync());
+applePayPostalCodeInput?.addEventListener("blur", () => syncApplePayPostalCode());
 
 initialize().catch((error) => {
   console.error("Apple Pay checkout initialization failed:", error);
@@ -69,10 +77,12 @@ async function initialize() {
   });
 
   checkout.on("change", (session) => {
-    document.getElementById("submit").disabled = !session.canConfirm;
+    checkoutCanConfirm = Boolean(session.canConfirm);
+    updateSubmitButton();
     recordDebugInfo({
       checkoutSessionChange: {
         canConfirm: session.canConfirm,
+        disabledReason: getSubmitDisabledReason(),
         lastChangeAt: new Date().toISOString(),
       },
     });
@@ -81,20 +91,35 @@ async function initialize() {
   const loadActionsResult = await checkout.loadActions();
   if (loadActionsResult.type === "success") {
     actions = loadActionsResult.actions;
-    const session = loadActionsResult.actions.getSession();
-    const amount = session?.total?.total?.amount;
-    document.querySelector("#button-text").textContent = amount
-      ? `Pay ${amount} now`
-      : "Subscribe with Apple Pay";
+    loadActionsResult.actions.getSession();
+    document.querySelector("#button-text").textContent = "Pay now";
   }
 
   const contactDetailsElement = checkout.createContactDetailsElement();
+  contactDetailsElement.on("change", (event) => {
+    recordDebugInfo({
+      contactDetailsElement: {
+        complete: event.complete,
+        empty: event.empty,
+        value: event.value,
+        lastChangeAt: new Date().toISOString(),
+      },
+    });
+  });
   contactDetailsElement.mount("#contact-details-element");
 
   const paymentElement = checkout.createPaymentElement({
     wallets: {
       applePay: "auto",
       googlePay: "never",
+    },
+    fields: {
+      billingDetails: {
+        name: "never",
+        email: "never",
+        phone: "never",
+        address: "never",
+      },
     },
   });
   paymentElement.on("ready", () => {
@@ -132,8 +157,7 @@ async function initialize() {
   });
   paymentElement.mount("#payment-element");
 
-  const billingAddressElement = checkout.createBillingAddressElement();
-  billingAddressElement.mount("#billing-address-element");
+  await syncApplePayPostalCode({ showErrors: false });
 
   recordDebugInfo({ browserWalletChecks: collectBrowserWalletDebug() });
   setLoading(false);
@@ -141,13 +165,33 @@ async function initialize() {
 
 async function handleSubmit(e) {
   e.preventDefault();
-  setLoading(true);
 
   try {
     if (!actions) {
       throw new Error("Checkout is still loading. Please try again in a moment.");
     }
 
+    const postalCode = validateApplePayPostalCode();
+    if (!postalCode) {
+      return;
+    }
+
+    clearTimeout(applePayPostalCodeUpdateTimer);
+
+    if (applePayPostalCodeUpdatePromise) {
+      showMessage("Billing ZIP is still updating — click Apple Pay again after this message clears.");
+      await applePayPostalCodeUpdatePromise;
+      return;
+    }
+
+    if (postalCode !== syncedApplePayPostalCode) {
+      showMessage("ZIP changed. Updating billing ZIP now — click Apple Pay again after this message clears.");
+      await syncApplePayPostalCode();
+      return;
+    }
+
+    // Apple Pay must be opened directly from the click/tap. Do not await
+    // updateBillingAddress immediately before this confirm call.
     const { error } = await actions.confirm();
 
     // This point will only be reached if there is an immediate error when
@@ -160,8 +204,74 @@ async function handleSubmit(e) {
     console.error("Apple Pay confirm threw:", error);
     showMessage(formatError(error));
   }
+}
 
-  setLoading(false);
+function scheduleApplePayPostalCodeSync() {
+  clearTimeout(applePayPostalCodeUpdateTimer);
+  applePayPostalCodeUpdateTimer = setTimeout(() => {
+    syncApplePayPostalCode({ showErrors: false });
+  }, 400);
+}
+
+async function syncApplePayPostalCode({ showErrors = true } = {}) {
+  if (!actions) return;
+
+  const postalCode = showErrors
+    ? validateApplePayPostalCode()
+    : document.querySelector("#apple-pay-postal-code")?.value.trim();
+
+  if (!postalCode) return;
+  if (postalCode === syncedApplePayPostalCode) return;
+
+  applePayPostalCodeUpdatePromise = actions.updateBillingAddress({
+    address: {
+      postal_code: postalCode,
+      country: "US",
+    },
+  });
+
+  try {
+    await applePayPostalCodeUpdatePromise;
+    syncedApplePayPostalCode = postalCode;
+    recordDebugInfo({
+      applePayCustomPostalCode: {
+        provided: true,
+        syncedPostalCode: postalCode,
+        syncedAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error("Apple Pay ZIP update failed:", error);
+    if (showErrors) showMessage(formatError(error));
+    recordDebugInfo({ applePayPostalCodeUpdateError: error });
+  } finally {
+    applePayPostalCodeUpdatePromise = null;
+  }
+}
+
+function validateApplePayPostalCode() {
+  const input = document.querySelector("#apple-pay-postal-code");
+  const error = document.querySelector("#apple-pay-postal-code-errors");
+  const postalCode = input?.value.trim() ?? "";
+
+  if (!postalCode) {
+    input?.classList.add("error");
+    if (error) error.textContent = "Enter a ZIP/postal code for Apple Pay.";
+    showMessage("Enter a ZIP/postal code for Apple Pay.");
+    return "";
+  }
+
+  input.classList.remove("error");
+  if (error) error.textContent = "";
+
+  recordDebugInfo({
+    applePayCustomPostalCode: {
+      provided: true,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+
+  return postalCode;
 }
 
 // ------- UI helpers -------
@@ -222,9 +332,9 @@ function recordDebugInfo(info) {
     {
       ...latestDebugInfo,
       notes: [
-        "Apple Pay page mirrors Stripe's Custom Checkout Elements example: submit handler, setLoading(true), then await actions.confirm().",
-        "Payment Element is narrowed to Apple Pay with wallets.applePay='auto' and wallets.googlePay='never'.",
-        "This page also mounts Contact Details and Billing Address Elements like Stripe's example.",
+        "Apple Pay page uses a manual ZIP field instead of Stripe's Billing Address Element.",
+        "The page syncs the manual ZIP with actions.updateBillingAddress() before the Apple Pay click; the submit handler does not await billing updates immediately before actions.confirm().",
+        "Payment Element is narrowed to Apple Pay with wallets.applePay='auto' and wallets.googlePay='never', and fields.billingDetails.address='never'.",
       ],
     },
     null,
@@ -309,14 +419,36 @@ function formatError(error) {
   }
 }
 
-function setLoading(isLoading) {
+function setLoading(loading) {
+  isLoading = loading;
+  updateSubmitButton();
+
   if (isLoading) {
-    document.querySelector("#submit").disabled = true;
     document.querySelector("#spinner").classList.remove("hidden");
     document.querySelector("#button-text").classList.add("hidden");
   } else {
-    document.querySelector("#submit").disabled = false;
     document.querySelector("#spinner").classList.add("hidden");
     document.querySelector("#button-text").classList.remove("hidden");
   }
+
+  recordDebugInfo({
+    submitButton: {
+      disabled: document.querySelector("#submit").disabled,
+      disabledReason: getSubmitDisabledReason(),
+      isLoading,
+      checkoutCanConfirm,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+}
+
+function updateSubmitButton() {
+  // Keep the button enabled while testing so failed confirms surface Stripe errors.
+  document.querySelector("#submit").disabled = false;
+}
+
+function getSubmitDisabledReason() {
+  if (isLoading) return "loading, but button intentionally left enabled";
+  if (!checkoutCanConfirm) return "checkout.canConfirm is false, but button intentionally left enabled";
+  return "";
 }

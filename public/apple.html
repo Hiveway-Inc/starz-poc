@@ -21,19 +21,20 @@
         <!--Stripe.js injects the Contact Details Element-->
       </div>
 
+      <h4>ZIP code</h4>
+      <div id="apple-pay-postal-code-container">
+        <input id="apple-pay-postal-code" name="apple-pay-postal-code" autocomplete="postal-code" inputmode="numeric" placeholder="ZIP code" value="10001" required />
+        <div id="apple-pay-postal-code-errors" role="alert"></div>
+      </div>
+
       <h4>Apple Pay</h4>
       <div id="payment-element">
         <!--Stripe.js injects the Payment Element-->
       </div>
 
-      <h4>Billing address</h4>
-      <div id="billing-address-element">
-        <!--Stripe.js injects the Billing Address Element-->
-      </div>
-
       <button id="submit">
         <div class="spinner hidden" id="spinner"></div>
-        <span id="button-text">Subscribe now</span>
+        <span id="button-text">Pay now</span>
       </button>
       <div id="payment-message" class="hidden"></div>
       <h4>Debug</h4>
