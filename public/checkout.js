@@ -8,8 +8,8 @@ let paymentElementBillingAddressNever = false;
 let googlePaySelected = false;
 let applePaySelected = false;
 let latestDebugInfo = {};
+let isLoading = false;
 let syncedWalletPostalCode = "";
-let walletPostalCodeUpdateTimer;
 let walletPostalCodeUpdatePromise = null;
 
 window.addEventListener("error", (event) => {
@@ -26,7 +26,7 @@ document
   .querySelector("#payment-form")
   .addEventListener("submit", handleSubmit);
 const walletPostalCodeInput = document.querySelector("#google-pay-postal-code");
-walletPostalCodeInput?.addEventListener("input", () => scheduleWalletPostalCodeSync());
+walletPostalCodeInput?.addEventListener("input", () => syncWalletPostalCode({ showErrors: false }));
 walletPostalCodeInput?.addEventListener("blur", () => syncWalletPostalCode());
 
 initialize().catch((error) => {
@@ -206,16 +206,8 @@ async function handleSubmit(e) {
         return;
       }
 
-      clearTimeout(walletPostalCodeUpdateTimer);
-
-      if (applePaySelected && walletPostalCodeUpdatePromise) {
-        showMessage("Billing ZIP is still updating — click Apple Pay again after this message clears.");
-        await walletPostalCodeUpdatePromise;
-        return;
-      }
-
-      if (applePaySelected && postalCode !== syncedWalletPostalCode) {
-        showMessage("ZIP changed. Updating billing ZIP now — click Apple Pay again after this message clears.");
+      if (applePaySelected && (walletPostalCodeUpdatePromise || postalCode !== syncedWalletPostalCode)) {
+        showMessage("Billing ZIP is still updating. Please try again once the button is enabled.");
         await syncWalletPostalCode();
         return;
       }
@@ -263,7 +255,7 @@ function updateGooglePayPostalCodeVisibility() {
   input.required = walletSelected;
 
   if (walletSelected) {
-    scheduleWalletPostalCodeSync();
+    syncWalletPostalCode({ showErrors: false });
   }
 
   if (!walletSelected) {
@@ -272,22 +264,29 @@ function updateGooglePayPostalCodeVisibility() {
   }
 }
 
-function scheduleWalletPostalCodeSync() {
-  clearTimeout(walletPostalCodeUpdateTimer);
-  walletPostalCodeUpdateTimer = setTimeout(() => {
-    syncWalletPostalCode({ showErrors: false });
-  }, 400);
-}
-
 async function syncWalletPostalCode({ showErrors = true } = {}) {
   if (!actions || (!googlePaySelected && !applePaySelected)) return;
 
-  const postalCode = showErrors
-    ? validateGooglePayPostalCode()
-    : document.querySelector("#google-pay-postal-code")?.value.trim();
+  if (walletPostalCodeUpdatePromise) {
+    try {
+      await walletPostalCodeUpdatePromise;
+    } catch {
+      // The in-flight sync records its own error; continue so the latest ZIP
+      // can retry below if needed.
+    }
+    if (getWalletPostalCode() === syncedWalletPostalCode) return;
+  }
 
-  if (!postalCode) return;
-  if (postalCode === syncedWalletPostalCode) return;
+  const postalCode = showErrors ? validateGooglePayPostalCode() : getWalletPostalCode();
+
+  if (!postalCode) {
+    updateSubmitButton();
+    return;
+  }
+  if (postalCode === syncedWalletPostalCode) {
+    updateSubmitButton();
+    return;
+  }
 
   try {
     walletPostalCodeUpdatePromise = actions.updateBillingAddress({
@@ -296,6 +295,7 @@ async function syncWalletPostalCode({ showErrors = true } = {}) {
         country: "US",
       },
     });
+    updateSubmitButton();
     await walletPostalCodeUpdatePromise;
     syncedWalletPostalCode = postalCode;
     recordDebugInfo({
@@ -313,7 +313,18 @@ async function syncWalletPostalCode({ showErrors = true } = {}) {
     recordDebugInfo({ walletPostalCodeUpdateError: error });
   } finally {
     walletPostalCodeUpdatePromise = null;
+    updateSubmitButton();
+
+    // If the user typed again while the previous update was in flight, sync
+    // the latest ZIP immediately and keep Apple Pay disabled until it lands.
+    if (getWalletPostalCode() && getWalletPostalCode() !== syncedWalletPostalCode) {
+      syncWalletPostalCode({ showErrors: false });
+    }
   }
+}
+
+function getWalletPostalCode() {
+  return document.querySelector("#google-pay-postal-code")?.value.trim() ?? "";
 }
 
 function validateGooglePayPostalCode() {
@@ -537,13 +548,51 @@ function formatError(error) {
 }
 
 // Show a spinner on payment submission
-function setLoading(isLoading) {
+function setLoading(loading) {
+  isLoading = loading;
+  updateSubmitButton();
+
   if (isLoading) {
-    // Keep the button enabled so Stripe/validation errors remain visible while testing.
     document.querySelector("#spinner").classList.remove("hidden");
     document.querySelector("#button-text").classList.add("hidden");
   } else {
     document.querySelector("#spinner").classList.add("hidden");
     document.querySelector("#button-text").classList.remove("hidden");
   }
+}
+
+function updateSubmitButton() {
+  const submitButton = document.querySelector("#submit");
+  const buttonText = document.querySelector("#button-text");
+  const disabledReason = getSubmitDisabledReason();
+
+  submitButton.disabled = Boolean(disabledReason);
+
+  if (!isLoading && buttonText) {
+    buttonText.textContent = disabledReason?.includes("ZIP") ? "Updating ZIP..." : "Subscribe now";
+  }
+
+  recordDebugInfo({
+    submitButton: {
+      disabled: submitButton.disabled,
+      disabledReason,
+      isLoading,
+      applePaySelected,
+      googlePaySelected,
+      syncedWalletPostalCode,
+      currentWalletPostalCode: getWalletPostalCode(),
+      updatedAt: new Date().toISOString(),
+    },
+  });
+}
+
+function getSubmitDisabledReason() {
+  const postalCode = getWalletPostalCode();
+  if (isLoading) return "loading";
+  if (applePaySelected && !postalCode) return "ZIP is empty";
+  if (applePaySelected && walletPostalCodeUpdatePromise) return "ZIP update is in progress";
+  if (applePaySelected && postalCode !== syncedWalletPostalCode) {
+    return "ZIP has not synced to Checkout yet";
+  }
+  return "";
 }

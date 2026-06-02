@@ -7,7 +7,6 @@ let isLoading = false;
 let checkoutCanConfirm = false;
 let syncedApplePayPostalCode = "";
 let applePayPostalCodeUpdatePromise = null;
-let applePayPostalCodeUpdateTimer;
 
 window.addEventListener("error", (event) => {
   console.error("Window error:", event.error || event.message);
@@ -21,7 +20,7 @@ window.addEventListener("unhandledrejection", (event) => {
 
 document.querySelector("#payment-form").addEventListener("submit", handleSubmit);
 const applePayPostalCodeInput = document.querySelector("#apple-pay-postal-code");
-applePayPostalCodeInput?.addEventListener("input", () => scheduleApplePayPostalCodeSync());
+applePayPostalCodeInput?.addEventListener("input", () => syncApplePayPostalCode({ showErrors: false }));
 applePayPostalCodeInput?.addEventListener("blur", () => syncApplePayPostalCode());
 
 initialize().catch((error) => {
@@ -176,16 +175,8 @@ async function handleSubmit(e) {
       return;
     }
 
-    clearTimeout(applePayPostalCodeUpdateTimer);
-
-    if (applePayPostalCodeUpdatePromise) {
-      showMessage("Billing ZIP is still updating — click Apple Pay again after this message clears.");
-      await applePayPostalCodeUpdatePromise;
-      return;
-    }
-
-    if (postalCode !== syncedApplePayPostalCode) {
-      showMessage("ZIP changed. Updating billing ZIP now — click Apple Pay again after this message clears.");
+    if (applePayPostalCodeUpdatePromise || postalCode !== syncedApplePayPostalCode) {
+      showMessage("Billing ZIP is still updating. Please try again once Pay now is enabled.");
       await syncApplePayPostalCode();
       return;
     }
@@ -206,22 +197,29 @@ async function handleSubmit(e) {
   }
 }
 
-function scheduleApplePayPostalCodeSync() {
-  clearTimeout(applePayPostalCodeUpdateTimer);
-  applePayPostalCodeUpdateTimer = setTimeout(() => {
-    syncApplePayPostalCode({ showErrors: false });
-  }, 400);
-}
-
 async function syncApplePayPostalCode({ showErrors = true } = {}) {
   if (!actions) return;
 
-  const postalCode = showErrors
-    ? validateApplePayPostalCode()
-    : document.querySelector("#apple-pay-postal-code")?.value.trim();
+  if (applePayPostalCodeUpdatePromise) {
+    try {
+      await applePayPostalCodeUpdatePromise;
+    } catch {
+      // The in-flight sync records its own error; continue so the latest ZIP
+      // can retry below if needed.
+    }
+    if (getApplePayPostalCode() === syncedApplePayPostalCode) return;
+  }
 
-  if (!postalCode) return;
-  if (postalCode === syncedApplePayPostalCode) return;
+  const postalCode = showErrors ? validateApplePayPostalCode() : getApplePayPostalCode();
+
+  if (!postalCode) {
+    updateSubmitButton();
+    return;
+  }
+  if (postalCode === syncedApplePayPostalCode) {
+    updateSubmitButton();
+    return;
+  }
 
   applePayPostalCodeUpdatePromise = actions.updateBillingAddress({
     address: {
@@ -229,6 +227,7 @@ async function syncApplePayPostalCode({ showErrors = true } = {}) {
       country: "US",
     },
   });
+  updateSubmitButton();
 
   try {
     await applePayPostalCodeUpdatePromise;
@@ -246,7 +245,18 @@ async function syncApplePayPostalCode({ showErrors = true } = {}) {
     recordDebugInfo({ applePayPostalCodeUpdateError: error });
   } finally {
     applePayPostalCodeUpdatePromise = null;
+    updateSubmitButton();
+
+    // If the user typed again while the previous update was in flight, sync
+    // the latest ZIP immediately and keep the button disabled until it lands.
+    if (getApplePayPostalCode() && getApplePayPostalCode() !== syncedApplePayPostalCode) {
+      syncApplePayPostalCode({ showErrors: false });
+    }
   }
+}
+
+function getApplePayPostalCode() {
+  return document.querySelector("#apple-pay-postal-code")?.value.trim() ?? "";
 }
 
 function validateApplePayPostalCode() {
@@ -443,12 +453,22 @@ function setLoading(loading) {
 }
 
 function updateSubmitButton() {
-  // Keep the button enabled while testing so failed confirms surface Stripe errors.
-  document.querySelector("#submit").disabled = false;
+  const submitButton = document.querySelector("#submit");
+  const buttonText = document.querySelector("#button-text");
+  const disabledReason = getSubmitDisabledReason();
+
+  submitButton.disabled = Boolean(disabledReason);
+
+  if (!isLoading && buttonText) {
+    buttonText.textContent = disabledReason?.includes("ZIP") ? "Updating ZIP..." : "Pay now";
+  }
 }
 
 function getSubmitDisabledReason() {
-  if (isLoading) return "loading, but button intentionally left enabled";
-  if (!checkoutCanConfirm) return "checkout.canConfirm is false, but button intentionally left enabled";
+  const postalCode = getApplePayPostalCode();
+  if (isLoading) return "loading";
+  if (!postalCode) return "ZIP is empty";
+  if (applePayPostalCodeUpdatePromise) return "ZIP update is in progress";
+  if (postalCode !== syncedApplePayPostalCode) return "ZIP has not synced to Checkout yet";
   return "";
 }
